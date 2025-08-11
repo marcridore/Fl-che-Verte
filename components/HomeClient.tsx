@@ -15,6 +15,7 @@ export default function HomeClient() {
   const [lastProvider, setLastProvider] = useState<string | null>(null);
   const [debugInfo, setDebugInfo] = useState<any>(null);
   const [showDebug, setShowDebug] = useState<boolean>(false);
+  const [refine, setRefine] = useState<string>('');
 
   useEffect(() => {
     // Initial generation via API (falls back to local on server)
@@ -72,6 +73,32 @@ export default function HomeClient() {
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
   }, [html]);
+
+  const onRefine = useCallback(async () => {
+    if (!refine.trim()) return;
+    setIsGenerating(true);
+    try {
+      const res = await fetch('/api/edit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ html, instruction: refine, provider })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setLastProvider(typeof err.provider === 'string' ? err.provider : null);
+        setDebugInfo(err.debug ?? null);
+        throw new Error(err?.error || `Edit failed (${res.status})`);
+      }
+      const data = await res.json();
+      setLastProvider(typeof data.provider === 'string' ? data.provider : null);
+      setDebugInfo(data.debug ?? null);
+      setHtml(String(data.html ?? ''));
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setIsGenerating(false);
+    }
+  }, [refine, html, provider]);
 
   const onOpen = useCallback(() => {
     const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
@@ -157,6 +184,19 @@ export default function HomeClient() {
               <input type="radio" name="provider" value="local" checked={provider==='local'} onChange={() => setProvider('local')} />
               <span>Local</span>
             </label>
+          </div>
+
+          <div className="mt-4 space-y-2">
+            <label className="block text-sm text-neutral-300">Refine (edit just a part)</label>
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <input
+                className="flex-1 rounded-md border border-white/10 bg-white/5 px-3 py-2 text-sm outline-none placeholder:text-neutral-500"
+                placeholder="e.g. make paragraph text darker and increase size in the hero"
+                value={refine}
+                onChange={(e)=>setRefine(e.target.value)}
+              />
+              <button onClick={onRefine} className="shrink-0 rounded-md border border-white/15 px-4 py-2 text-sm hover:bg-white/5">Apply edit</button>
+            </div>
           </div>
         </section>
 
