@@ -16,11 +16,42 @@ export default function HomeClient() {
   const [debugInfo, setDebugInfo] = useState<any>(null);
   const [showDebug, setShowDebug] = useState<boolean>(false);
   const [refine, setRefine] = useState<string>('');
+  const [projectId, setProjectId] = useState<string | null>(null);
+  const [showProjects, setShowProjects] = useState<boolean>(false);
+  const [projects, setProjects] = useState<Array<{ id: string; title: string; updatedAt: number }>>([]);
+  // localStorage helpers so saving survives dev server reloads
+  const localSaveProject = useCallback((id: string, title: string, htmlContent: string) => {
+    const key = 'vibecode_projects_v1';
+    const arr: any[] = JSON.parse(localStorage.getItem(key) || '[]');
+    const existingIdx = arr.findIndex((p) => p.id === id);
+    const record = { id, title, html: htmlContent, updatedAt: Date.now() };
+    if (existingIdx >= 0) arr[existingIdx] = { ...arr[existingIdx], ...record };
+    else arr.push(record);
+    localStorage.setItem(key, JSON.stringify(arr));
+  }, []);
+
+  const localListProjects = useCallback(() => {
+    const key = 'vibecode_projects_v1';
+    const arr: any[] = JSON.parse(localStorage.getItem(key) || '[]');
+    return arr as Array<{ id: string; title: string; html?: string; updatedAt: number }>;
+  }, []);
+
+  const localGetProject = useCallback((id: string) => {
+    return localListProjects().find((p) => p.id === id);
+  }, [localListProjects]);
 
   useEffect(() => {
     // Initial generation via API (falls back to local on server)
     (async () => {
       try {
+        // Ensure a project exists first
+        let id = projectId;
+        if (!id) {
+          const r = await fetch('/api/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'New Project' }) });
+          const pj = await r.json();
+          id = String(pj?.project?.id ?? '');
+          setProjectId(id);
+        }
         const res = await fetch('/api/generate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -29,7 +60,13 @@ export default function HomeClient() {
         const data = await res.json();
         setLastProvider(typeof data.provider === 'string' ? data.provider : null);
         setDebugInfo(data.debug ?? null);
-        setHtml(String(data.html ?? ''));
+        const newHtml = String(data.html ?? '');
+        setHtml(newHtml);
+        // Autosave generated HTML to the project so Load will work immediately
+        if (id) {
+          await fetch(`/api/projects/${id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ html: newHtml }) });
+          localSaveProject(id, 'New Project', newHtml);
+        }
       } catch (e) {
         console.error(e);
       }
@@ -53,7 +90,12 @@ export default function HomeClient() {
       const data = await res.json();
       setLastProvider(typeof data.provider === 'string' ? data.provider : null);
       setDebugInfo(data.debug ?? null);
-      setHtml(String(data.html ?? ''));
+      const newHtml = String(data.html ?? '');
+      setHtml(newHtml);
+      if (projectId) {
+        await fetch(`/api/projects/${projectId}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ html: newHtml }) });
+        localSaveProject(projectId, 'Untitled', newHtml);
+      }
     } catch (err) {
       console.error(err);
       alert((err as Error).message);
@@ -92,7 +134,12 @@ export default function HomeClient() {
       const data = await res.json();
       setLastProvider(typeof data.provider === 'string' ? data.provider : null);
       setDebugInfo(data.debug ?? null);
-      setHtml(String(data.html ?? ''));
+      const newHtml = String(data.html ?? '');
+      setHtml(newHtml);
+      if (projectId) {
+        await fetch(`/api/projects/${projectId}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ html: newHtml }) });
+        localSaveProject(projectId, 'Untitled', newHtml);
+      }
     } catch (e) {
       alert((e as Error).message);
     } finally {
@@ -111,6 +158,72 @@ export default function HomeClient() {
     await navigator.clipboard.writeText(html);
   }, [html]);
 
+  const onSave = useCallback(async () => {
+    if (!projectId) return;
+    await fetch(`/api/projects/${projectId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ html })
+    });
+    localSaveProject(projectId, 'Untitled', html);
+  }, [projectId, html]);
+
+  const onLoad = useCallback(async () => {
+    if (!projectId) return;
+    const res = await fetch(`/api/projects/${projectId}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.project?.html !== undefined) {
+        setHtml(String(data.project.html));
+        return;
+      }
+    }
+    // Fallback to local cache if server lost memory (dev reload)
+    const local = localGetProject(projectId);
+    if (local?.html !== undefined) setHtml(String(local.html));
+  }, [projectId]);
+
+  const refreshProjects = useCallback(async () => {
+    const res = await fetch('/api/projects');
+    const data = await res.json();
+    const serverList: Array<{ id: string; title: string; updatedAt: number }> = Array.isArray(data.projects) ? data.projects : [];
+    const localList = localListProjects().map((p) => ({ id: p.id, title: p.title || 'Untitled', updatedAt: p.updatedAt }));
+    const merged = new Map<string, { id: string; title: string; updatedAt: number }>();
+    [...serverList, ...localList].forEach((p) => merged.set(p.id, p));
+    const sorted = Array.from(merged.values()).sort((a, b) => b.updatedAt - a.updatedAt);
+    setProjects(sorted);
+  }, [localListProjects]);
+
+  const onNewProject = useCallback(async () => {
+    const r = await fetch('/api/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Untitled' }) });
+    const pj = await r.json();
+    const id = String(pj?.project?.id ?? '');
+    setProjectId(id);
+    setHtml('');
+    setShowProjects(false);
+    localSaveProject(id, 'Untitled', '');
+    await refreshProjects();
+  }, [refreshProjects]);
+
+  const onSwitchProject = useCallback(async (id: string) => {
+    const res = await fetch(`/api/projects/${id}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.project) {
+        setProjectId(String(data.project.id));
+        setHtml(String(data.project.html || ''));
+        setShowProjects(false);
+        return;
+      }
+    }
+    const local = localGetProject(id);
+    if (local) {
+      setProjectId(local.id);
+      setHtml(String(local.html || ''));
+      setShowProjects(false);
+    }
+  }, [localGetProject]);
+
   return (
     <main className="min-h-screen p-4 sm:p-6 lg:p-8">
       <div className="mx-auto max-w-7xl space-y-6">
@@ -118,8 +231,12 @@ export default function HomeClient() {
           <div className="space-y-1.5">
             <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight">VibeCode</h1>
             <p className="text-sm text-neutral-400">Describe the vibe, get a website. Edit the code live and preview instantly.</p>
+            {projectId && (
+              <p className="text-[11px] text-neutral-500">Project: <span className="text-neutral-300">{projectId}</span></p>
+            )}
           </div>
           <div className="flex gap-2">
+            <button onClick={async ()=>{ setShowProjects((v)=>!v); if (!showProjects) await refreshProjects(); }} className="rounded-md border border-white/15 px-3 py-2 text-sm hover:bg-white/5">Projects</button>
             <button
               onClick={onGenerate}
               className={clsx(
@@ -130,6 +247,8 @@ export default function HomeClient() {
             >
               {isGenerating ? 'Vibing…' : 'VibeCode'}
             </button>
+            <button onClick={onSave} className="rounded-md border border-white/15 px-3 py-2 text-sm hover:bg-white/5">Save</button>
+            <button onClick={onLoad} className="rounded-md border border-white/15 px-3 py-2 text-sm hover:bg-white/5">Load</button>
             <button onClick={onDownload} className="rounded-md border border-white/15 px-3 py-2 text-sm hover:bg-white/5">Download</button>
             <button onClick={onOpen} className="rounded-md border border-white/15 px-3 py-2 text-sm hover:bg-white/5">Open</button>
             <button onClick={onCopy} className="rounded-md border border-white/15 px-3 py-2 text-sm hover:bg-white/5">Copy HTML</button>
@@ -201,6 +320,31 @@ export default function HomeClient() {
         </section>
 
         <section className="grid grid-cols-1 gap-4 lg:grid-cols-2 lg:gap-6">
+          {showProjects && (
+            <div className="lg:col-span-2 rounded-lg border border-white/10 bg-black/40 p-4 text-sm">
+              <div className="mb-2 flex items-center justify-between">
+                <div className="font-medium">Projects</div>
+                <div className="flex gap-2">
+                  <button onClick={refreshProjects} className="rounded-md border border-white/15 px-2 py-1 text-xs hover:bg-white/5">Refresh</button>
+                  <button onClick={onNewProject} className="rounded-md border border-white/15 px-2 py-1 text-xs hover:bg-white/5">New</button>
+                </div>
+              </div>
+              <div className="max-h-48 overflow-auto divide-y divide-white/10">
+                {projects.length === 0 && <div className="py-2 text-neutral-400">No projects yet</div>}
+                {projects.map(p => (
+                  <div key={p.id} className="flex items-center justify-between gap-2 py-2">
+                    <div className="truncate">
+                      <div className="truncate">{p.title || 'Untitled'}</div>
+                      <div className="text-xs text-neutral-500">{p.id}</div>
+                    </div>
+                    <div className="flex gap-2">
+                      <button onClick={()=>onSwitchProject(p.id)} className="rounded-md border border-white/15 px-2 py-1 text-xs hover:bg-white/5">Load</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="h-[70vh] lg:h-[78vh]">
             <MonacoEditor value={html} onChange={setHtml} />
           </div>
