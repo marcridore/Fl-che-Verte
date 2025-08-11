@@ -17,6 +17,7 @@ export default function HomeClient() {
   const [showDebug, setShowDebug] = useState<boolean>(false);
   const [refine, setRefine] = useState<string>('');
   const [projectId, setProjectId] = useState<string | null>(null);
+  const [projectTitle, setProjectTitle] = useState<string>('Untitled');
   const [showProjects, setShowProjects] = useState<boolean>(false);
   const [projects, setProjects] = useState<Array<{ id: string; title: string; updatedAt: number }>>([]);
   // localStorage helpers so saving survives dev server reloads
@@ -47,10 +48,11 @@ export default function HomeClient() {
         // Ensure a project exists first
         let id = projectId;
         if (!id) {
-          const r = await fetch('/api/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'New Project' }) });
+          const r = await fetch('/api/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Untitled' }) });
           const pj = await r.json();
           id = String(pj?.project?.id ?? '');
           setProjectId(id);
+          if (pj?.project?.title) setProjectTitle(String(pj.project.title));
         }
         const res = await fetch('/api/generate', {
           method: 'POST',
@@ -64,8 +66,8 @@ export default function HomeClient() {
         setHtml(newHtml);
         // Autosave generated HTML to the project so Load will work immediately
         if (id) {
-          await fetch(`/api/projects/${id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ html: newHtml }) });
-          localSaveProject(id, 'New Project', newHtml);
+          await fetch(`/api/projects/${id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ html: newHtml, title: projectTitle }) });
+          localSaveProject(id, projectTitle || 'Untitled', newHtml);
         }
       } catch (e) {
         console.error(e);
@@ -93,8 +95,8 @@ export default function HomeClient() {
       const newHtml = String(data.html ?? '');
       setHtml(newHtml);
       if (projectId) {
-        await fetch(`/api/projects/${projectId}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ html: newHtml }) });
-        localSaveProject(projectId, 'Untitled', newHtml);
+        await fetch(`/api/projects/${projectId}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ html: newHtml, title: projectTitle }) });
+        localSaveProject(projectId, projectTitle || 'Untitled', newHtml);
       }
     } catch (err) {
       console.error(err);
@@ -137,8 +139,8 @@ export default function HomeClient() {
       const newHtml = String(data.html ?? '');
       setHtml(newHtml);
       if (projectId) {
-        await fetch(`/api/projects/${projectId}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ html: newHtml }) });
-        localSaveProject(projectId, 'Untitled', newHtml);
+        await fetch(`/api/projects/${projectId}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ html: newHtml, title: projectTitle }) });
+        localSaveProject(projectId, projectTitle || 'Untitled', newHtml);
       }
     } catch (e) {
       alert((e as Error).message);
@@ -158,15 +160,31 @@ export default function HomeClient() {
     await navigator.clipboard.writeText(html);
   }, [html]);
 
+  // List projects (server + local) — defined before onSave to avoid TDZ
+  const refreshProjects = useCallback(async () => {
+    const res = await fetch('/api/projects');
+    const data = await res.json();
+    const serverList: Array<{ id: string; title: string; updatedAt: number }> = Array.isArray(data.projects) ? data.projects : [];
+    const localList = localListProjects().map((p) => ({ id: p.id, title: p.title || 'Untitled', updatedAt: p.updatedAt }));
+    const merged = new Map<string, { id: string; title: string; updatedAt: number }>();
+    [...serverList, ...localList].forEach((p) => merged.set(p.id, p));
+    const sorted = Array.from(merged.values()).sort((a, b) => b.updatedAt - a.updatedAt);
+    setProjects(sorted);
+  }, [localListProjects]);
+
   const onSave = useCallback(async () => {
     if (!projectId) return;
+    const name = window.prompt('Project name', projectTitle || 'Untitled');
+    const finalTitle = name === null ? projectTitle : (name.trim() || 'Untitled');
+    setProjectTitle(finalTitle);
     await fetch(`/api/projects/${projectId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ html })
+      body: JSON.stringify({ html, title: finalTitle })
     });
-    localSaveProject(projectId, 'Untitled', html);
-  }, [projectId, html]);
+    localSaveProject(projectId, finalTitle, html);
+    await refreshProjects();
+  }, [projectId, html, projectTitle, refreshProjects]);
 
   const onLoad = useCallback(async () => {
     if (!projectId) return;
@@ -183,27 +201,27 @@ export default function HomeClient() {
     if (local?.html !== undefined) setHtml(String(local.html));
   }, [projectId]);
 
-  const refreshProjects = useCallback(async () => {
-    const res = await fetch('/api/projects');
-    const data = await res.json();
-    const serverList: Array<{ id: string; title: string; updatedAt: number }> = Array.isArray(data.projects) ? data.projects : [];
-    const localList = localListProjects().map((p) => ({ id: p.id, title: p.title || 'Untitled', updatedAt: p.updatedAt }));
-    const merged = new Map<string, { id: string; title: string; updatedAt: number }>();
-    [...serverList, ...localList].forEach((p) => merged.set(p.id, p));
-    const sorted = Array.from(merged.values()).sort((a, b) => b.updatedAt - a.updatedAt);
-    setProjects(sorted);
-  }, [localListProjects]);
+  
 
   const onNewProject = useCallback(async () => {
-    const r = await fetch('/api/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Untitled' }) });
+    // Offer to save current project first
+    if (projectId) {
+      const shouldSave = window.confirm('Save current project before creating a new one?');
+      if (shouldSave) {
+        await onSave();
+      }
+    }
+    const name = window.prompt('Name for new project', 'Untitled') || 'Untitled';
+    const r = await fetch('/api/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: name }) });
     const pj = await r.json();
     const id = String(pj?.project?.id ?? '');
     setProjectId(id);
+    setProjectTitle(name);
     setHtml('');
     setShowProjects(false);
-    localSaveProject(id, 'Untitled', '');
+    localSaveProject(id, name, '');
     await refreshProjects();
-  }, [refreshProjects]);
+  }, [projectId, onSave, refreshProjects]);
 
   const onSwitchProject = useCallback(async (id: string) => {
     const res = await fetch(`/api/projects/${id}`);
@@ -212,6 +230,7 @@ export default function HomeClient() {
       if (data?.project) {
         setProjectId(String(data.project.id));
         setHtml(String(data.project.html || ''));
+        if (data.project.title) setProjectTitle(String(data.project.title));
         setShowProjects(false);
         return;
       }
@@ -220,6 +239,7 @@ export default function HomeClient() {
     if (local) {
       setProjectId(local.id);
       setHtml(String(local.html || ''));
+      if (local.title) setProjectTitle(String(local.title));
       setShowProjects(false);
     }
   }, [localGetProject]);
@@ -232,7 +252,7 @@ export default function HomeClient() {
             <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight">VibeCode</h1>
             <p className="text-sm text-neutral-400">Describe the vibe, get a website. Edit the code live and preview instantly.</p>
             {projectId && (
-              <p className="text-[11px] text-neutral-500">Project: <span className="text-neutral-300">{projectId}</span></p>
+              <p className="text-[11px] text-neutral-500">Project: <span className="text-neutral-300">{projectTitle}</span> <span className="text-neutral-600">({projectId})</span></p>
             )}
           </div>
           <div className="flex gap-2">
